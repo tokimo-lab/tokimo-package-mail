@@ -1,0 +1,45 @@
+[package]
+name = "tokimo-mail"
+version = "0.1.0"
+edition = "2024"
+description = "Email client library — IMAP/SMTP with full provider support"
+
+[lib]
+name = "tokimo_mail"
+path = "src/lib.rs"
+
+[dependencies]
+# IMAP
+async-imap = "0.10"
+# SMTP (sending)
+lettre = { version = "0.11", default-features = false, features = [
+    "tokio1-rustls-tls",
+    "smtp-transport",
+    "builder",
+] }
+# Email parsing
+mailparse = "0.15"
+# TLS
+tokio-rustls = "0.26"
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+rustls-pki-types = "1"
+webpki-roots = "1"
+# Async runtime
+tokio = { version = "1", features = ["sync", "time", "macros", "rt", "net"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+futures = "0.3"
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Error handling
+thiserror = "2"
+# Logging
+tracing = "0.1"
+# Utils
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+html2text = "0.14"
+
+[lints]
+workspace = true
