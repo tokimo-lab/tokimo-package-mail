@@ -12,11 +12,11 @@ pub async fn send_message(
     cfg: &MailAccountConfig,
     compose: &ComposeMessage,
 ) -> Result<(), MailError> {
-    let from_mailbox: Mailbox = format!(
-        "{} <{}>",
-        cfg.sender_name.as_deref().unwrap_or(&cfg.email),
-        cfg.email
-    )
+    let from_mailbox: Mailbox = if let Some(ref name) = cfg.sender_name {
+        format!("{name} <{}>", cfg.email)
+    } else {
+        cfg.email.clone()
+    }
     .parse()
     .map_err(|e| MailError::Smtp(format!("invalid From address: {e}")))?;
 

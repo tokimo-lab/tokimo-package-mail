@@ -80,15 +80,73 @@ impl MailClient {
             return Ok((vec![], 0));
         }
 
-        // Calculate UID range for the page (newest first).
+        // Calculate sequence number range for the page (newest first).
+        // Note: `total` is the sequence count from SELECT, so this is a sequence range.
+        // fetch_summaries uses FETCH (not UID FETCH) and includes UID in the item list,
+        // so we get the real IMAP UIDs back even though we address by sequence number.
         let end = total.saturating_sub((page - 1) * page_size);
         let start = end.saturating_sub(page_size).max(1);
 
-        let uid_range = format!("{start}:{end}");
-        let summaries = imap::fetch_summaries(&mut session, &uid_range).await?;
+        let seq_range = format!("{start}:{end}");
+        let summaries = imap::fetch_summaries(&mut session, &seq_range).await?;
 
         let _ = session.logout().await;
         Ok((summaries, total))
+    }
+
+    /// Fetch new messages since a given UID (incremental sync).
+    /// Returns summaries of messages with UID > `since_uid`, plus the folder total.
+    pub async fn fetch_new_messages_since(
+        &self,
+        folder: &str,
+        since_uid: u32,
+    ) -> Result<(Vec<MailMessageSummary>, u32), MailError> {
+        let mut session = imap::connect(&self.config).await?;
+        let (total, _) = imap::select_folder(&mut session, folder).await?;
+
+        if total == 0 {
+            let _ = session.logout().await;
+            return Ok((vec![], 0));
+        }
+
+        let uid_range = format!("{}:*", since_uid + 1);
+        let mut summaries =
+            imap::fetch_summaries_by_uid_range(&mut session, &uid_range).await?;
+
+        // UID FETCH "n:*" may return the message with UID == since_uid
+        // when there are no newer messages (IMAP spec: * = last message UID).
+        // Filter it out.
+        summaries.retain(|s| s.uid > since_uid);
+
+        let _ = session.logout().await;
+        Ok((summaries, total))
+    }
+
+    /// Fetch message summaries by a comma-separated UID set (e.g. "123,456,789").
+    pub async fn fetch_summaries_by_uids(
+        &self,
+        folder: &str,
+        uid_set: &str,
+    ) -> Result<Vec<MailMessageSummary>, MailError> {
+        let mut session = imap::connect(&self.config).await?;
+        let _ = imap::select_folder(&mut session, folder).await?;
+        let summaries = imap::fetch_summaries_by_uid_range(&mut session, uid_set).await?;
+        let _ = session.logout().await;
+        Ok(summaries)
+    }
+
+    /// Batch-fetch full messages by UID set in a single IMAP session.
+    /// Does NOT mark messages as seen — suitable for sync / backfill.
+    pub async fn fetch_messages_batch(
+        &self,
+        folder: &str,
+        uid_set: &str,
+    ) -> Result<Vec<MailMessage>, MailError> {
+        let mut session = imap::connect(&self.config).await?;
+        let _ = imap::select_folder(&mut session, folder).await?;
+        let messages = imap::fetch_messages_batch(&mut session, uid_set).await?;
+        let _ = session.logout().await;
+        Ok(messages)
     }
 
     /// Fetch a single message by UID from a folder.
@@ -164,4 +222,5 @@ impl MailClient {
         let _ = session.logout().await;
         Ok(uids)
     }
+
 }

@@ -16,9 +16,13 @@ type ImapSession = async_imap::Session<Compat<tokio_rustls::client::TlsStream<Tc
 fn tls_config() -> Arc<rustls::ClientConfig> {
     let mut root_store = rustls::RootCertStore::empty();
     root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let config = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("TLS protocol versions")
+    .with_root_certificates(root_store)
+    .with_no_client_auth();
     Arc::new(config)
 }
 
@@ -99,15 +103,16 @@ pub async fn select_folder(
     Ok((total, unseen))
 }
 
-/// Fetch message summaries (headers only) for a UID range.
-/// `uid_range` is an IMAP sequence set like "1:50" or "100:*".
+/// Fetch message summaries (headers only) for a sequence number range.
+/// `seq_range` is an IMAP sequence set like "1:50" or "100:200" (sequence numbers, not UIDs).
+/// The `UID` item is included in the fetch so we get the real UID of each message.
 pub async fn fetch_summaries(
     session: &mut ImapSession,
-    uid_range: &str,
+    seq_range: &str,
 ) -> Result<Vec<MailMessageSummary>, MailError> {
     let fetches: Vec<Fetch> = session
-        .uid_fetch(
-            uid_range,
+        .fetch(
+            seq_range,
             "(UID FLAGS RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE MESSAGE-ID CONTENT-TYPE)])",
         )
         .await
@@ -155,6 +160,55 @@ pub async fn fetch_summaries(
     Ok(summaries)
 }
 
+/// Fetch message summaries by UID range (e.g. "64853:*").
+/// Used for incremental sync — fetch only messages newer than a known UID.
+pub async fn fetch_summaries_by_uid_range(
+    session: &mut ImapSession,
+    uid_range: &str,
+) -> Result<Vec<MailMessageSummary>, MailError> {
+    let fetches: Vec<Fetch> = session
+        .uid_fetch(
+            uid_range,
+            "(UID FLAGS RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE MESSAGE-ID CONTENT-TYPE)])",
+        )
+        .await
+        .map_err(|e| MailError::Imap(format!("UID FETCH headers: {e}")))?
+        .try_collect()
+        .await
+        .map_err(|e| MailError::Imap(format!("UID FETCH stream: {e}")))?;
+
+    let mut summaries = Vec::with_capacity(fetches.len());
+    for fetch in &fetches {
+        let uid = fetch.uid.unwrap_or(0);
+        let flags = extract_flags(fetch);
+        let size = fetch.size.unwrap_or(0);
+
+        let header_bytes = fetch
+            .header()
+            .or_else(|| fetch.body().or(fetch.text()))
+            .unwrap_or_default();
+
+        let (subject, from, to, date, message_id, has_attachments) =
+            parse_header_fields(header_bytes);
+
+        summaries.push(MailMessageSummary {
+            uid,
+            message_id,
+            subject,
+            from,
+            to,
+            date,
+            flags,
+            has_attachments,
+            preview: String::new(),
+            size,
+        });
+    }
+
+    summaries.sort_by(|a, b| b.uid.cmp(&a.uid));
+    Ok(summaries)
+}
+
 /// Fetch a single complete message by UID.
 pub async fn fetch_message(
     session: &mut ImapSession,
@@ -178,6 +232,38 @@ pub async fn fetch_message(
 
     let msg = build_full_message(uid, &parsed, flags, size);
     Ok(msg)
+}
+
+/// Batch-fetch full messages by UID set (e.g. "123,456,789" or "100:200").
+/// Does NOT mark messages as seen — suitable for sync / backfill.
+pub async fn fetch_messages_batch(
+    session: &mut ImapSession,
+    uid_set: &str,
+) -> Result<Vec<MailMessage>, MailError> {
+    let fetches: Vec<Fetch> = session
+        .uid_fetch(uid_set, "(UID FLAGS RFC822.SIZE RFC822)")
+        .await
+        .map_err(|e| MailError::Imap(format!("FETCH batch: {e}")))?
+        .try_collect()
+        .await
+        .map_err(|e| MailError::Imap(format!("FETCH batch stream: {e}")))?;
+
+    let mut messages = Vec::with_capacity(fetches.len());
+    for fetch in &fetches {
+        let uid = fetch.uid.unwrap_or(0);
+        let flags = extract_flags(fetch);
+        let size = fetch.size.unwrap_or(0);
+        let raw = fetch.body().unwrap_or_default();
+        match mailparse::parse_mail(raw) {
+            Ok(parsed) => {
+                messages.push(build_full_message(uid, &parsed, flags, size));
+            }
+            Err(e) => {
+                tracing::warn!("Failed to parse message uid={uid}: {e}");
+            }
+        }
+    }
+    Ok(messages)
 }
 
 /// Mark messages as seen/read.
