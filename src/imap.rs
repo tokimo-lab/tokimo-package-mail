@@ -258,6 +258,31 @@ pub async fn fetch_message(
     Ok(msg)
 }
 
+/// Batch-fetch only UID + FLAGS for a set of UIDs.
+/// Returns Vec<(uid, is_read, is_flagged)>.
+pub async fn fetch_flags_batch(
+    session: &mut ImapSession,
+    uid_set: &str,
+) -> Result<Vec<(u32, bool, bool)>, MailError> {
+    let fetches: Vec<Fetch> = session
+        .uid_fetch(uid_set, "(UID FLAGS)")
+        .await
+        .map_err(|e| MailError::Imap(format!("FETCH flags: {e}")))?
+        .try_collect()
+        .await
+        .map_err(|e| MailError::Imap(format!("FETCH flags stream: {e}")))?;
+
+    let mut result = Vec::with_capacity(fetches.len());
+    for fetch in &fetches {
+        let uid = fetch.uid.unwrap_or(0);
+        let flags = extract_flags(fetch);
+        let is_read = flags.iter().any(|f| f == "\\Seen");
+        let is_flagged = flags.iter().any(|f| f == "\\Flagged");
+        result.push((uid, is_read, is_flagged));
+    }
+    Ok(result)
+}
+
 /// Batch-fetch full messages by UID set (e.g. "123,456,789" or "100:200").
 /// Does NOT mark messages as seen — suitable for sync / backfill.
 pub async fn fetch_messages_batch(

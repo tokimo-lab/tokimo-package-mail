@@ -210,6 +210,19 @@ impl MailClient {
         Ok(())
     }
 
+    /// Batch-fetch flags for a set of UIDs. Returns Vec<(uid, is_read, is_flagged)>.
+    pub async fn fetch_flags_batch(
+        &self,
+        folder: &str,
+        uid_set: &str,
+    ) -> Result<Vec<(u32, bool, bool)>, MailError> {
+        let mut session = imap::connect(&self.config).await?;
+        let _ = imap::select_folder(&mut session, folder).await?;
+        let flags = imap::fetch_flags_batch(&mut session, uid_set).await?;
+        let _ = session.logout().await;
+        Ok(flags)
+    }
+
     /// List all UIDs in a folder (for reconciliation).
     pub async fn list_all_uids(&self, folder: &str) -> Result<Vec<u32>, MailError> {
         let mut session = imap::connect(&self.config).await?;
