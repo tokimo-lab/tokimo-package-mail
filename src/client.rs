@@ -49,7 +49,7 @@ impl MailClient {
         let mut folders = imap::list_folders(&mut session).await?;
 
         for folder in &mut folders {
-            match imap::select_folder(&mut session, &folder.name).await {
+            match imap::folder_status(&mut session, &folder.name).await {
                 Ok((total, unseen)) => {
                     folder.total = Some(total);
                     folder.unseen = Some(unseen);
@@ -208,6 +208,15 @@ impl MailClient {
         imap::move_messages(&mut session, uids, to_folder).await?;
         let _ = session.logout().await;
         Ok(())
+    }
+
+    /// List all UIDs in a folder (for reconciliation).
+    pub async fn list_all_uids(&self, folder: &str) -> Result<Vec<u32>, MailError> {
+        let mut session = imap::connect(&self.config).await?;
+        let _ = imap::select_folder(&mut session, folder).await?;
+        let uids = imap::list_all_uids(&mut session).await?;
+        let _ = session.logout().await;
+        Ok(uids)
     }
 
     /// Search messages in a folder.

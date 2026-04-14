@@ -89,6 +89,30 @@ pub async fn list_folders(session: &mut ImapSession) -> Result<Vec<MailFolder>, 
     Ok(folders)
 }
 
+/// Query folder counts via STATUS (returns actual unseen **count**, unlike
+/// SELECT whose UNSEEN is the sequence-number of the first unseen message).
+pub async fn folder_status(
+    session: &mut ImapSession,
+    folder: &str,
+) -> Result<(u32, u32), MailError> {
+    let mailbox = session
+        .status(folder, "(MESSAGES UNSEEN)")
+        .await
+        .map_err(|e| MailError::Imap(format!("STATUS {folder}: {e}")))?;
+    let total = mailbox.exists;
+    let unseen = mailbox.unseen.unwrap_or(0);
+    Ok((total, unseen))
+}
+
+/// List all UIDs in the currently selected mailbox.
+pub async fn list_all_uids(session: &mut ImapSession) -> Result<Vec<u32>, MailError> {
+    let result = session
+        .uid_search("ALL")
+        .await
+        .map_err(|e| MailError::Imap(format!("UID SEARCH ALL: {e}")))?;
+    Ok(result.into_iter().collect())
+}
+
 /// Select a mailbox and return (total, unseen).
 pub async fn select_folder(
     session: &mut ImapSession,
