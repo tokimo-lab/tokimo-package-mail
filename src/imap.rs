@@ -137,7 +137,7 @@ pub async fn fetch_summaries(
     let fetches: Vec<Fetch> = session
         .fetch(
             seq_range,
-            "(UID FLAGS RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE MESSAGE-ID CONTENT-TYPE)])",
+            "(UID FLAGS RFC822.SIZE INTERNALDATE BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE MESSAGE-ID CONTENT-TYPE)])",
         )
         .await
         .map_err(|e| MailError::Imap(format!("FETCH headers: {e}")))?
@@ -162,6 +162,7 @@ pub async fn fetch_summaries(
 
         let (subject, from, to, date, message_id, has_attachments) =
             parse_header_fields(header_bytes);
+        let date = date.or_else(|| fetch.internal_date());
 
         let preview = String::new(); // Preview requires body fetch
 
@@ -193,7 +194,7 @@ pub async fn fetch_summaries_by_uid_range(
     let fetches: Vec<Fetch> = session
         .uid_fetch(
             uid_range,
-            "(UID FLAGS RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE MESSAGE-ID CONTENT-TYPE)])",
+            "(UID FLAGS RFC822.SIZE INTERNALDATE BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE MESSAGE-ID CONTENT-TYPE)])",
         )
         .await
         .map_err(|e| MailError::Imap(format!("UID FETCH headers: {e}")))?
@@ -214,6 +215,7 @@ pub async fn fetch_summaries_by_uid_range(
 
         let (subject, from, to, date, message_id, has_attachments) =
             parse_header_fields(header_bytes);
+        let date = date.or_else(|| fetch.internal_date());
 
         summaries.push(MailMessageSummary {
             uid,
@@ -239,7 +241,7 @@ pub async fn fetch_message(
     uid: u32,
 ) -> Result<MailMessage, MailError> {
     let fetches: Vec<Fetch> = session
-        .uid_fetch(uid.to_string(), "(UID FLAGS RFC822.SIZE RFC822)")
+        .uid_fetch(uid.to_string(), "(UID FLAGS RFC822.SIZE INTERNALDATE RFC822)")
         .await
         .map_err(|e| MailError::Imap(format!("FETCH message: {e}")))?
         .try_collect()
@@ -254,7 +256,10 @@ pub async fn fetch_message(
     let parsed =
         mailparse::parse_mail(raw).map_err(|e| MailError::Parse(format!("parse mail: {e}")))?;
 
-    let msg = build_full_message(uid, &parsed, flags, size);
+    let mut msg = build_full_message(uid, &parsed, flags, size);
+    if msg.date.is_none() {
+        msg.date = fetch.internal_date();
+    }
     Ok(msg)
 }
 
@@ -290,7 +295,7 @@ pub async fn fetch_messages_batch(
     uid_set: &str,
 ) -> Result<Vec<MailMessage>, MailError> {
     let fetches: Vec<Fetch> = session
-        .uid_fetch(uid_set, "(UID FLAGS RFC822.SIZE RFC822)")
+        .uid_fetch(uid_set, "(UID FLAGS RFC822.SIZE INTERNALDATE RFC822)")
         .await
         .map_err(|e| MailError::Imap(format!("FETCH batch: {e}")))?
         .try_collect()
@@ -305,7 +310,11 @@ pub async fn fetch_messages_batch(
         let raw = fetch.body().unwrap_or_default();
         match mailparse::parse_mail(raw) {
             Ok(parsed) => {
-                messages.push(build_full_message(uid, &parsed, flags, size));
+                let mut msg = build_full_message(uid, &parsed, flags, size);
+                if msg.date.is_none() {
+                    msg.date = fetch.internal_date();
+                }
+                messages.push(msg);
             }
             Err(e) => {
                 tracing::warn!("Failed to parse message uid={uid}: {e}");
