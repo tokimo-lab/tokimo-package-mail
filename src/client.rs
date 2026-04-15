@@ -246,3 +246,75 @@ impl MailClient {
     }
 
 }
+
+/// A long-lived IMAP session for a single account.
+/// Reuses one TCP+TLS connection across multiple folder operations,
+/// avoiding the ~500ms TLS handshake overhead on every call.
+pub struct MailSession {
+    session: imap::ImapSession,
+}
+
+impl MailSession {
+    /// Open a new IMAP connection for the given account config.
+    pub async fn connect(config: &MailAccountConfig) -> Result<Self, MailError> {
+        let session = imap::connect(config).await?;
+        Ok(Self { session })
+    }
+
+    /// SELECT a folder; returns (total_messages, unseen_count).
+    pub async fn open_folder(&mut self, folder: &str) -> Result<(u32, u32), MailError> {
+        imap::select_folder(&mut self.session, folder).await
+    }
+
+    /// Fetch message summaries (headers only, no body) for a UID range/set.
+    /// Folder must be selected first via `open_folder`.
+    pub async fn fetch_summaries_by_uids(
+        &mut self,
+        uid_set: &str,
+    ) -> Result<Vec<crate::message::MailMessageSummary>, MailError> {
+        imap::fetch_summaries_by_uid_range(&mut self.session, uid_set).await
+    }
+
+    /// Fetch full messages (with body) for a UID set string like "1,2,3" or "10:20".
+    /// Folder must be selected first via `open_folder`.
+    pub async fn fetch_messages_batch(
+        &mut self,
+        uid_set: &str,
+    ) -> Result<Vec<crate::message::MailMessage>, MailError> {
+        imap::fetch_messages_batch(&mut self.session, uid_set).await
+    }
+
+    /// Fetch read/flagged state for a UID set.
+    /// Returns Vec<(uid, is_read, is_flagged)>.
+    /// Folder must be selected first via `open_folder`.
+    pub async fn fetch_flags_batch(
+        &mut self,
+        uid_set: &str,
+    ) -> Result<Vec<(u32, bool, bool)>, MailError> {
+        imap::fetch_flags_batch(&mut self.session, uid_set).await
+    }
+
+    /// List all UIDs in the currently selected folder.
+    /// Folder must be selected first via `open_folder`.
+    pub async fn list_all_uids(&mut self) -> Result<Vec<u32>, MailError> {
+        imap::list_all_uids(&mut self.session).await
+    }
+
+    /// Gracefully logout and close the connection.
+    pub async fn logout(mut self) {
+        let _ = self.session.logout().await;
+    }
+
+    /// Enter IMAP IDLE mode, waiting up to `timeout_secs` for a server push notification
+    /// (e.g., new message arrived, flag changed). Returns `(self, new_data_detected)`.
+    /// Consumes self and returns it back so the connection can be reused.
+    ///
+    /// Per RFC 2177, clients should re-issue IDLE every 29 minutes; use 25 * 60 as timeout.
+    pub async fn into_idle_wait(
+        self,
+        timeout_secs: u64,
+    ) -> Result<(Self, bool), MailError> {
+        let (session, new_data) = imap::idle_wait(self.session, timeout_secs).await?;
+        Ok((Self { session }, new_data))
+    }
+}
