@@ -8,10 +8,7 @@ use crate::error::MailError;
 use crate::message::ComposeMessage;
 
 /// Send an email via SMTP.
-pub async fn send_message(
-    cfg: &MailAccountConfig,
-    compose: &ComposeMessage,
-) -> Result<(), MailError> {
+pub async fn send_message(cfg: &MailAccountConfig, compose: &ComposeMessage) -> Result<(), MailError> {
     let from_mailbox: Mailbox = if let Some(ref name) = cfg.sender_name {
         format!("{name} <{}>", cfg.email)
     } else {
@@ -60,12 +57,7 @@ pub async fn send_message(
                         .singlepart(
                             SinglePart::builder()
                                 .content_type(ContentType::TEXT_PLAIN)
-                                .body(
-                                    compose
-                                        .text_body
-                                        .clone()
-                                        .unwrap_or_default(),
-                                ),
+                                .body(compose.text_body.clone().unwrap_or_default()),
                         )
                         .singlepart(
                             SinglePart::builder()
@@ -104,19 +96,12 @@ pub async fn send_message(
         let mut mixed = MultiPart::mixed().multipart(text_part);
 
         for att in &compose.attachments {
-            let data = base64::Engine::decode(
-                &base64::engine::general_purpose::STANDARD,
-                &att.data,
-            )
-            .map_err(|e| MailError::Smtp(format!("decode attachment: {e}")))?;
+            let data = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &att.data)
+                .map_err(|e| MailError::Smtp(format!("decode attachment: {e}")))?;
 
-            let content_type: ContentType = att
-                .content_type
-                .parse()
-                .unwrap_or(ContentType::TEXT_PLAIN);
+            let content_type: ContentType = att.content_type.parse().unwrap_or(ContentType::TEXT_PLAIN);
 
-            let attachment =
-                Attachment::new(att.filename.clone()).body(data, content_type);
+            let attachment = Attachment::new(att.filename.clone()).body(data, content_type);
             mixed = mixed.singlepart(attachment);
         }
 
@@ -134,19 +119,15 @@ pub async fn send_message(
             .port(cfg.smtp_port)
             .credentials(creds)
             .build(),
-        SecurityMode::StartTls => {
-            AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&cfg.smtp_host)
-                .map_err(|e| MailError::Smtp(format!("SMTP starttls: {e}")))?
-                .port(cfg.smtp_port)
-                .credentials(creds)
-                .build()
-        }
-        SecurityMode::None => AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(
-            &cfg.smtp_host,
-        )
-        .port(cfg.smtp_port)
-        .credentials(creds)
-        .build(),
+        SecurityMode::StartTls => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&cfg.smtp_host)
+            .map_err(|e| MailError::Smtp(format!("SMTP starttls: {e}")))?
+            .port(cfg.smtp_port)
+            .credentials(creds)
+            .build(),
+        SecurityMode::None => AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&cfg.smtp_host)
+            .port(cfg.smtp_port)
+            .credentials(creds)
+            .build(),
     };
 
     transport

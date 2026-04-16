@@ -4,7 +4,7 @@ use async_imap::types::{Fetch, Flag, Name};
 use futures::TryStreamExt;
 use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::config::{MailAccountConfig, SecurityMode};
 use crate::error::MailError;
@@ -16,13 +16,11 @@ pub(crate) type ImapSession = async_imap::Session<Compat<tokio_rustls::client::T
 fn tls_config() -> Arc<rustls::ClientConfig> {
     let mut root_store = rustls::RootCertStore::empty();
     root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .expect("TLS protocol versions")
-    .with_root_certificates(root_store)
-    .with_no_client_auth();
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .expect("TLS protocol versions")
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
     Arc::new(config)
 }
 
@@ -91,10 +89,7 @@ pub async fn list_folders(session: &mut ImapSession) -> Result<Vec<MailFolder>, 
 
 /// Query folder counts via STATUS (returns actual unseen **count**, unlike
 /// SELECT whose UNSEEN is the sequence-number of the first unseen message).
-pub async fn folder_status(
-    session: &mut ImapSession,
-    folder: &str,
-) -> Result<(u32, u32), MailError> {
+pub async fn folder_status(session: &mut ImapSession, folder: &str) -> Result<(u32, u32), MailError> {
     let mailbox = session
         .status(folder, "(MESSAGES UNSEEN)")
         .await
@@ -114,14 +109,11 @@ pub async fn list_all_uids(session: &mut ImapSession) -> Result<Vec<u32>, MailEr
 }
 
 /// Select a mailbox and return (total, unseen).
-pub async fn select_folder(
-    session: &mut ImapSession,
-    folder: &str,
-) -> Result<(u32, u32), MailError> {
+pub async fn select_folder(session: &mut ImapSession, folder: &str) -> Result<(u32, u32), MailError> {
     let mailbox = session
         .select(folder)
         .await
-        .map_err(|e| MailError::MailboxNotFound(format!("{folder}: {e}")))?;
+        .map_err(|e| MailError::Imap(format!("SELECT '{folder}': {e}")))?;
     let total = mailbox.exists;
     let unseen = mailbox.unseen.unwrap_or(0);
     Ok((total, unseen))
@@ -132,10 +124,7 @@ pub async fn select_folder(
 /// The `UID` item is included in the fetch so we get the real UID of each message.
 ///
 /// Uses ENVELOPE (server-cached metadata) which is ~3x faster than BODY.PEEK[HEADER.FIELDS].
-pub async fn fetch_summaries(
-    session: &mut ImapSession,
-    seq_range: &str,
-) -> Result<Vec<MailMessageSummary>, MailError> {
+pub async fn fetch_summaries(session: &mut ImapSession, seq_range: &str) -> Result<Vec<MailMessageSummary>, MailError> {
     let fetches: Vec<Fetch> = session
         .fetch(seq_range, "(UID FLAGS RFC822.SIZE INTERNALDATE ENVELOPE)")
         .await
@@ -156,8 +145,30 @@ pub async fn fetch_summaries(
 /// Fetch message summaries by UID range (e.g. "64853:*").
 /// Used for incremental sync — fetch only messages newer than a known UID.
 ///
-/// Uses ENVELOPE (server-cached metadata) which is ~3x faster than BODY.PEEK[HEADER.FIELDS].
+/// Resilience strategy (some servers like `new.mail.taobao.com` emit
+/// malformed ENVELOPE responses with unescaped quotes inside Message-ID,
+/// which poisons the entire IMAP stream on the first bad response):
+///
+/// 1. Try ENVELOPE (fast path — server-cached metadata, ~3x faster).
+/// 2. On stream/parse failure, retry using `BODY.PEEK[HEADER.FIELDS (...)]`
+///    which uses length-prefixed IMAP literals and is immune to
+///    quoted-string escaping bugs.
+/// 3. If the header-fields fetch also fails on a plain `low:high` range,
+///    bisect and recurse — at size=1 log the poisoned UID and skip it.
 pub async fn fetch_summaries_by_uid_range(
+    session: &mut ImapSession,
+    uid_range: &str,
+) -> Result<Vec<MailMessageSummary>, MailError> {
+    match fetch_summaries_envelope(session, uid_range).await {
+        Ok(summaries) => Ok(summaries),
+        Err(e) => {
+            warn!("ENVELOPE fetch failed for '{uid_range}': {e}; retrying with HEADER.FIELDS");
+            fetch_summaries_header_fields_resilient(session, uid_range).await
+        }
+    }
+}
+
+async fn fetch_summaries_envelope(
     session: &mut ImapSession,
     uid_range: &str,
 ) -> Result<Vec<MailMessageSummary>, MailError> {
@@ -178,12 +189,104 @@ pub async fn fetch_summaries_by_uid_range(
     Ok(summaries)
 }
 
+/// UID FETCH using HEADER.FIELDS literal (binary-safe). Bisects on failure
+/// when the range is a plain `low:high`.
+fn fetch_summaries_header_fields_resilient<'a>(
+    session: &'a mut ImapSession,
+    uid_range: &'a str,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<MailMessageSummary>, MailError>> + Send + 'a>> {
+    Box::pin(async move {
+        match fetch_summaries_header_fields(session, uid_range).await {
+            Ok(summaries) => Ok(summaries),
+            Err(e) => {
+                // Try to bisect plain numeric ranges "low:high". Anything else
+                // (wildcards, comma lists) we can't safely split — propagate.
+                let Some((low, high)) = parse_plain_range(uid_range) else {
+                    return Err(e);
+                };
+                if low >= high {
+                    warn!("Skipping poisoned UID {low} in folder: {e}");
+                    return Ok(Vec::new());
+                }
+                let mid = low + (high - low) / 2;
+                let left = format!("{low}:{mid}");
+                let right = format!("{}:{high}", mid + 1);
+                warn!("HEADER.FIELDS fetch failed for '{uid_range}': {e}; bisecting into '{left}' + '{right}'");
+                let mut out = fetch_summaries_header_fields_resilient(session, &left).await?;
+                let mut right_out = fetch_summaries_header_fields_resilient(session, &right).await?;
+                out.append(&mut right_out);
+                out.sort_by(|a, b| b.uid.cmp(&a.uid));
+                Ok(out)
+            }
+        }
+    })
+}
+
+async fn fetch_summaries_header_fields(
+    session: &mut ImapSession,
+    uid_range: &str,
+) -> Result<Vec<MailMessageSummary>, MailError> {
+    // HEADER.FIELDS is returned as a length-prefixed literal — immune to
+    // quoted-string escaping bugs in the server's ENVELOPE output.
+    let query = "(UID FLAGS RFC822.SIZE INTERNALDATE \
+                 BODY.PEEK[HEADER.FIELDS (SUBJECT FROM TO DATE MESSAGE-ID CONTENT-TYPE)])";
+    let fetches: Vec<Fetch> = session
+        .uid_fetch(uid_range, query)
+        .await
+        .map_err(|e| MailError::Imap(format!("UID FETCH header-fields: {e}")))?
+        .try_collect()
+        .await
+        .map_err(|e| MailError::Imap(format!("UID FETCH header-fields stream: {e}")))?;
+
+    let mut summaries = Vec::with_capacity(fetches.len());
+    for fetch in &fetches {
+        summaries.push(build_summary_from_header_fields(fetch));
+    }
+
+    summaries.sort_by(|a, b| b.uid.cmp(&a.uid));
+    Ok(summaries)
+}
+
+/// Parse a plain "low:high" numeric IMAP range. Returns None for wildcards
+/// (`n:*`) or comma-separated sets — those can't be safely bisected.
+fn parse_plain_range(range: &str) -> Option<(u32, u32)> {
+    if range.contains(',') || range.contains('*') {
+        return None;
+    }
+    let (l, h) = range.split_once(':')?;
+    let low: u32 = l.trim().parse().ok()?;
+    let high: u32 = h.trim().parse().ok()?;
+    Some((low, high))
+}
+
+fn build_summary_from_header_fields(fetch: &Fetch) -> MailMessageSummary {
+    let uid = fetch.uid.unwrap_or(0);
+    let flags = extract_flags(fetch);
+    let size = fetch.size.unwrap_or(0);
+    let header_bytes = fetch
+        .header()
+        .or_else(|| fetch.body().or(fetch.text()))
+        .unwrap_or_default();
+    let (subject, from, to, date, message_id, has_attachments) = parse_header_fields(header_bytes);
+    let date = date.or_else(|| fetch.internal_date());
+
+    MailMessageSummary {
+        uid,
+        message_id,
+        subject,
+        from,
+        to,
+        date,
+        flags,
+        has_attachments,
+        preview: String::new(),
+        size,
+    }
+}
+
 /// Fetch a single complete message by UID.
 /// Uses BODY.PEEK[] to avoid implicitly marking the message as \Seen.
-pub async fn fetch_message(
-    session: &mut ImapSession,
-    uid: u32,
-) -> Result<MailMessage, MailError> {
+pub async fn fetch_message(session: &mut ImapSession, uid: u32) -> Result<MailMessage, MailError> {
     let fetches: Vec<Fetch> = session
         .uid_fetch(uid.to_string(), "(UID FLAGS RFC822.SIZE INTERNALDATE BODY.PEEK[])")
         .await
@@ -197,8 +300,7 @@ pub async fn fetch_message(
     let size = fetch.size.unwrap_or(0);
 
     let raw = fetch.body().unwrap_or_default();
-    let parsed =
-        mailparse::parse_mail(raw).map_err(|e| MailError::Parse(format!("parse mail: {e}")))?;
+    let parsed = mailparse::parse_mail(raw).map_err(|e| MailError::Parse(format!("parse mail: {e}")))?;
 
     let mut msg = build_full_message(uid, &parsed, flags, size);
     if msg.date.is_none() {
@@ -209,10 +311,7 @@ pub async fn fetch_message(
 
 /// Batch-fetch only UID + FLAGS for a set of UIDs.
 /// Returns Vec<(uid, is_read, is_flagged)>.
-pub async fn fetch_flags_batch(
-    session: &mut ImapSession,
-    uid_set: &str,
-) -> Result<Vec<(u32, bool, bool)>, MailError> {
+pub async fn fetch_flags_batch(session: &mut ImapSession, uid_set: &str) -> Result<Vec<(u32, bool, bool)>, MailError> {
     let fetches: Vec<Fetch> = session
         .uid_fetch(uid_set, "(UID FLAGS)")
         .await
@@ -234,10 +333,7 @@ pub async fn fetch_flags_batch(
 
 /// Batch-fetch full messages by UID set (e.g. "123,456,789" or "100:200").
 /// Uses BODY.PEEK[] to avoid implicitly marking messages as \Seen.
-pub async fn fetch_messages_batch(
-    session: &mut ImapSession,
-    uid_set: &str,
-) -> Result<Vec<MailMessage>, MailError> {
+pub async fn fetch_messages_batch(session: &mut ImapSession, uid_set: &str) -> Result<Vec<MailMessage>, MailError> {
     let fetches: Vec<Fetch> = session
         .uid_fetch(uid_set, "(UID FLAGS RFC822.SIZE INTERNALDATE BODY.PEEK[])")
         .await
@@ -327,11 +423,7 @@ pub async fn delete_messages(session: &mut ImapSession, uids: &[u32]) -> Result<
 }
 
 /// Move messages to another folder (using IMAP MOVE or COPY+DELETE).
-pub async fn move_messages(
-    session: &mut ImapSession,
-    uids: &[u32],
-    target_folder: &str,
-) -> Result<(), MailError> {
+pub async fn move_messages(session: &mut ImapSession, uids: &[u32], target_folder: &str) -> Result<(), MailError> {
     let uid_set = uids
         .iter()
         .map(std::string::ToString::to_string)
@@ -363,10 +455,7 @@ pub async fn move_messages(
 /// IMAP IDLE — wait for server push notifications.
 /// Returns the session back along with whether new mail was detected.
 /// `timeout` is in seconds; 0 means wait indefinitely (up to server limit).
-pub async fn idle_wait(
-    session: ImapSession,
-    timeout_secs: u64,
-) -> Result<(ImapSession, bool), MailError> {
+pub async fn idle_wait(session: ImapSession, timeout_secs: u64) -> Result<(ImapSession, bool), MailError> {
     let mut idle = session.idle();
     idle.init()
         .await
@@ -384,8 +473,7 @@ pub async fn idle_wait(
         .await
         .map_err(|e| MailError::Imap(format!("IDLE wait: {e}")))?;
 
-    let has_new_data =
-        matches!(response, async_imap::extensions::idle::IdleResponse::NewData(_));
+    let has_new_data = matches!(response, async_imap::extensions::idle::IdleResponse::NewData(_));
     debug!("IDLE completed: {response:?}");
 
     // Call done() on the handle to recover the session.
@@ -401,14 +489,9 @@ pub async fn idle_wait(
 }
 
 /// Search messages by query string (IMAP SEARCH).
-pub async fn search(
-    session: &mut ImapSession,
-    query: &str,
-) -> Result<Vec<u32>, MailError> {
+pub async fn search(session: &mut ImapSession, query: &str) -> Result<Vec<u32>, MailError> {
     // Build IMAP search criteria — search in subject, from, body.
-    let criteria = format!(
-        "OR OR SUBJECT \"{query}\" FROM \"{query}\" BODY \"{query}\""
-    );
+    let criteria = format!("OR OR SUBJECT \"{query}\" FROM \"{query}\" BODY \"{query}\"");
     let result = session
         .uid_search(&criteria)
         .await
@@ -444,11 +527,7 @@ fn build_summary_from_fetch(fetch: &Fetch) -> MailMessageSummary {
     let size = fetch.size.unwrap_or(0);
 
     let (subject, from, to, date, message_id) = if let Some(env) = fetch.envelope() {
-        let subject = env
-            .subject
-            .as_deref()
-            .map(decode_envelope_bytes)
-            .unwrap_or_default();
+        let subject = env.subject.as_deref().map(decode_envelope_bytes).unwrap_or_default();
         let from = parse_envelope_addresses(env.from.as_ref());
         let to = parse_envelope_addresses(env.to.as_ref());
         let date = env
@@ -458,10 +537,7 @@ fn build_summary_from_fetch(fetch: &Fetch) -> MailMessageSummary {
                 let s = String::from_utf8_lossy(d);
                 mailparse::dateparse(&s)
                     .ok()
-                    .and_then(|ts| {
-                        chrono::DateTime::from_timestamp(ts, 0)
-                            .map(|dt| dt.fixed_offset())
-                    })
+                    .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0).map(|dt| dt.fixed_offset()))
             })
             .or_else(|| fetch.internal_date());
         let message_id = env
@@ -500,25 +576,18 @@ fn decode_envelope_bytes(raw: &[u8]) -> String {
     let mut header = b"X: ".to_vec();
     header.extend_from_slice(raw);
     header.extend_from_slice(b"\r\n");
-    mailparse::parse_header(&header)
-        .map_or_else(|_| String::from_utf8_lossy(raw).into_owned(), |(h, _)| h.get_value())
+    mailparse::parse_header(&header).map_or_else(|_| String::from_utf8_lossy(raw).into_owned(), |(h, _)| h.get_value())
 }
 
 /// Convert IMAP ENVELOPE address list to `Vec<MailAddress>`.
-fn parse_envelope_addresses(
-    addrs: Option<&Vec<async_imap::imap_proto::Address<'_>>>,
-) -> Vec<MailAddress> {
+fn parse_envelope_addresses(addrs: Option<&Vec<async_imap::imap_proto::Address<'_>>>) -> Vec<MailAddress> {
     let Some(list) = addrs else {
         return vec![];
     };
     list.iter()
         .filter_map(|a| {
             let address = match (&a.mailbox, &a.host) {
-                (Some(mb), Some(host)) => format!(
-                    "{}@{}",
-                    String::from_utf8_lossy(mb),
-                    String::from_utf8_lossy(host)
-                ),
+                (Some(mb), Some(host)) => format!("{}@{}", String::from_utf8_lossy(mb), String::from_utf8_lossy(host)),
                 _ => return None,
             };
             let name = a.name.as_deref().map(decode_envelope_bytes);
@@ -556,10 +625,7 @@ fn parse_header_fields(header_bytes: &[u8]) -> HeaderFields {
             "date" => {
                 date = mailparse::dateparse(&h.get_value())
                     .ok()
-                    .and_then(|ts| {
-                        chrono::DateTime::from_timestamp(ts, 0)
-                            .map(|dt| dt.fixed_offset())
-                    });
+                    .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0).map(|dt| dt.fixed_offset()));
             }
             "message-id" => message_id = Some(h.get_value()),
             "content-type" => {
@@ -601,12 +667,7 @@ fn parse_address_list(raw: &str) -> Vec<MailAddress> {
         .unwrap_or_default()
 }
 
-fn build_full_message(
-    uid: u32,
-    parsed: &mailparse::ParsedMail<'_>,
-    flags: Vec<String>,
-    size: u32,
-) -> MailMessage {
+fn build_full_message(uid: u32, parsed: &mailparse::ParsedMail<'_>, flags: Vec<String>, size: u32) -> MailMessage {
     let headers = &parsed.headers;
     let mut subject = String::new();
     let mut from = Vec::new();
@@ -630,19 +691,12 @@ fn build_full_message(
             "date" => {
                 date = mailparse::dateparse(&h.get_value())
                     .ok()
-                    .and_then(|ts| {
-                        chrono::DateTime::from_timestamp(ts, 0)
-                            .map(|dt| dt.fixed_offset())
-                    });
+                    .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0).map(|dt| dt.fixed_offset()));
             }
             "message-id" => message_id = Some(h.get_value()),
             "in-reply-to" => in_reply_to = Some(h.get_value()),
             "references" => {
-                references = h
-                    .get_value()
-                    .split_whitespace()
-                    .map(String::from)
-                    .collect();
+                references = h.get_value().split_whitespace().map(String::from).collect();
             }
             _ => {}
         }
@@ -684,13 +738,9 @@ fn collect_parts(
     let mime = &ctype.mimetype;
 
     // Check if this is an attachment via Content-Disposition
-    let is_attachment = part
-        .headers
-        .iter()
-        .any(|h| {
-            h.get_key().to_lowercase() == "content-disposition"
-                && h.get_value().to_lowercase().starts_with("attachment")
-        });
+    let is_attachment = part.headers.iter().any(|h| {
+        h.get_key().to_lowercase() == "content-disposition" && h.get_value().to_lowercase().starts_with("attachment")
+    });
 
     if is_attachment || ctype.params.contains_key("name") {
         if let Ok(body) = part.get_body_raw() {

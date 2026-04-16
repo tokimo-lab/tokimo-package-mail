@@ -23,9 +23,7 @@ impl MailClient {
     pub async fn test_connection(&self) -> Result<(), MailError> {
         // Test IMAP
         let mut session = imap::connect(&self.config).await?;
-        let _ = session
-            .logout()
-            .await;
+        let _ = session.logout().await;
         debug!("IMAP connection test passed for {}", self.config.email);
 
         // Test SMTP by doing a no-op send check (just connect).
@@ -110,8 +108,7 @@ impl MailClient {
         }
 
         let uid_range = format!("{}:*", since_uid + 1);
-        let mut summaries =
-            imap::fetch_summaries_by_uid_range(&mut session, &uid_range).await?;
+        let mut summaries = imap::fetch_summaries_by_uid_range(&mut session, &uid_range).await?;
 
         // UID FETCH "n:*" may return the message with UID == since_uid
         // when there are no newer messages (IMAP spec: * = last message UID).
@@ -137,11 +134,7 @@ impl MailClient {
 
     /// Batch-fetch full messages by UID set in a single IMAP session.
     /// Does NOT mark messages as seen — suitable for sync / backfill.
-    pub async fn fetch_messages_batch(
-        &self,
-        folder: &str,
-        uid_set: &str,
-    ) -> Result<Vec<MailMessage>, MailError> {
+    pub async fn fetch_messages_batch(&self, folder: &str, uid_set: &str) -> Result<Vec<MailMessage>, MailError> {
         let mut session = imap::connect(&self.config).await?;
         let _ = imap::select_folder(&mut session, folder).await?;
         let messages = imap::fetch_messages_batch(&mut session, uid_set).await?;
@@ -150,11 +143,7 @@ impl MailClient {
     }
 
     /// Fetch a single message by UID from a folder.
-    pub async fn fetch_message(
-        &self,
-        folder: &str,
-        uid: u32,
-    ) -> Result<MailMessage, MailError> {
+    pub async fn fetch_message(&self, folder: &str, uid: u32) -> Result<MailMessage, MailError> {
         let mut session = imap::connect(&self.config).await?;
         let _ = imap::select_folder(&mut session, folder).await?;
         let message = imap::fetch_message(&mut session, uid).await?;
@@ -197,12 +186,7 @@ impl MailClient {
     }
 
     /// Move messages to another folder.
-    pub async fn move_messages(
-        &self,
-        from_folder: &str,
-        uids: &[u32],
-        to_folder: &str,
-    ) -> Result<(), MailError> {
+    pub async fn move_messages(&self, from_folder: &str, uids: &[u32], to_folder: &str) -> Result<(), MailError> {
         let mut session = imap::connect(&self.config).await?;
         let _ = imap::select_folder(&mut session, from_folder).await?;
         imap::move_messages(&mut session, uids, to_folder).await?;
@@ -211,11 +195,7 @@ impl MailClient {
     }
 
     /// Batch-fetch flags for a set of UIDs. Returns Vec<(uid, is_read, is_flagged)>.
-    pub async fn fetch_flags_batch(
-        &self,
-        folder: &str,
-        uid_set: &str,
-    ) -> Result<Vec<(u32, bool, bool)>, MailError> {
+    pub async fn fetch_flags_batch(&self, folder: &str, uid_set: &str) -> Result<Vec<(u32, bool, bool)>, MailError> {
         let mut session = imap::connect(&self.config).await?;
         let _ = imap::select_folder(&mut session, folder).await?;
         let flags = imap::fetch_flags_batch(&mut session, uid_set).await?;
@@ -233,18 +213,13 @@ impl MailClient {
     }
 
     /// Search messages in a folder.
-    pub async fn search(
-        &self,
-        folder: &str,
-        query: &str,
-    ) -> Result<Vec<u32>, MailError> {
+    pub async fn search(&self, folder: &str, query: &str) -> Result<Vec<u32>, MailError> {
         let mut session = imap::connect(&self.config).await?;
         let _ = imap::select_folder(&mut session, folder).await?;
         let uids = imap::search(&mut session, query).await?;
         let _ = session.logout().await;
         Ok(uids)
     }
-
 }
 
 /// A long-lived IMAP session for a single account.
@@ -277,20 +252,14 @@ impl MailSession {
 
     /// Fetch full messages (with body) for a UID set string like "1,2,3" or "10:20".
     /// Folder must be selected first via `open_folder`.
-    pub async fn fetch_messages_batch(
-        &mut self,
-        uid_set: &str,
-    ) -> Result<Vec<crate::message::MailMessage>, MailError> {
+    pub async fn fetch_messages_batch(&mut self, uid_set: &str) -> Result<Vec<crate::message::MailMessage>, MailError> {
         imap::fetch_messages_batch(&mut self.session, uid_set).await
     }
 
     /// Fetch read/flagged state for a UID set.
     /// Returns Vec<(uid, is_read, is_flagged)>.
     /// Folder must be selected first via `open_folder`.
-    pub async fn fetch_flags_batch(
-        &mut self,
-        uid_set: &str,
-    ) -> Result<Vec<(u32, bool, bool)>, MailError> {
+    pub async fn fetch_flags_batch(&mut self, uid_set: &str) -> Result<Vec<(u32, bool, bool)>, MailError> {
         imap::fetch_flags_batch(&mut self.session, uid_set).await
     }
 
@@ -310,10 +279,7 @@ impl MailSession {
     /// Consumes self and returns it back so the connection can be reused.
     ///
     /// Per RFC 2177, clients should re-issue IDLE every 29 minutes; use 25 * 60 as timeout.
-    pub async fn into_idle_wait(
-        self,
-        timeout_secs: u64,
-    ) -> Result<(Self, bool), MailError> {
+    pub async fn into_idle_wait(self, timeout_secs: u64) -> Result<(Self, bool), MailError> {
         let (session, new_data) = imap::idle_wait(self.session, timeout_secs).await?;
         Ok((Self { session }, new_data))
     }

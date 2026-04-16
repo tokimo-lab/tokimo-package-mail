@@ -160,9 +160,7 @@ pub fn all_provider_presets() -> Vec<ProviderPreset> {
                 "Create a new app password and use it here".into(),
             ],
             requires_app_password: true,
-            app_password_url: Some(
-                "https://account.live.com/proofs/AppPassword".into(),
-            ),
+            app_password_url: Some("https://account.live.com/proofs/AppPassword".into()),
             domains: vec![
                 "outlook.com".into(),
                 "hotmail.com".into(),
@@ -187,9 +185,7 @@ pub fn all_provider_presets() -> Vec<ProviderPreset> {
                 "Copy the generated password and use it here".into(),
             ],
             requires_app_password: true,
-            app_password_url: Some(
-                "https://login.yahoo.com/account/security".into(),
-            ),
+            app_password_url: Some("https://login.yahoo.com/account/security".into()),
             domains: vec!["yahoo.com".into(), "yahoo.co.jp".into()],
         },
         ProviderPreset {
@@ -306,9 +302,7 @@ pub fn config_from_preset(
     display_name: Option<&str>,
 ) -> MailAccountConfig {
     MailAccountConfig {
-        display_name: display_name
-            .unwrap_or(&preset.display_name)
-            .to_string(),
+        display_name: display_name.unwrap_or(&preset.display_name).to_string(),
         email: email.to_string(),
         imap_host: preset.imap_host.clone(),
         imap_port: preset.imap_port,
