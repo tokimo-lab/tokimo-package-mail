@@ -241,6 +241,15 @@ impl MailSession {
         imap::select_folder(&mut self.session, folder).await
     }
 
+    /// SELECT a folder; returns `(total_messages, unseen_count, uid_validity)`.
+    ///
+    /// Use this variant when you persist UIDs locally — callers must compare
+    /// `uid_validity` against the cached value and wipe local state on change
+    /// (RFC 3501 §2.3.1.1).
+    pub async fn open_folder_ex(&mut self, folder: &str) -> Result<(u32, u32, Option<u32>), MailError> {
+        imap::select_folder_ex(&mut self.session, folder).await
+    }
+
     /// Fetch message summaries (headers only, no body) for a UID range/set.
     /// Folder must be selected first via `open_folder`.
     pub async fn fetch_summaries_by_uids(

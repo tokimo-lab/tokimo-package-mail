@@ -110,13 +110,27 @@ pub async fn list_all_uids(session: &mut ImapSession) -> Result<Vec<u32>, MailEr
 
 /// Select a mailbox and return (total, unseen).
 pub async fn select_folder(session: &mut ImapSession, folder: &str) -> Result<(u32, u32), MailError> {
+    let (total, unseen, _) = select_folder_ex(session, folder).await?;
+    Ok((total, unseen))
+}
+
+/// Select a mailbox and return (total, unseen, `uid_validity`).
+///
+/// RFC 3501 §2.3.1.1: `UIDVALIDITY` changes if the server's UID space is reset
+/// (mailbox deleted + recreated, Dovecot rebuild, etc.). Callers that persist
+/// UIDs locally MUST purge their cache and resync when this value changes.
+pub async fn select_folder_ex(
+    session: &mut ImapSession,
+    folder: &str,
+) -> Result<(u32, u32, Option<u32>), MailError> {
     let mailbox = session
         .select(folder)
         .await
         .map_err(|e| MailError::Imap(format!("SELECT '{folder}': {e}")))?;
     let total = mailbox.exists;
     let unseen = mailbox.unseen.unwrap_or(0);
-    Ok((total, unseen))
+    let uid_validity = mailbox.uid_validity;
+    Ok((total, unseen, uid_validity))
 }
 
 /// Fetch message summaries (headers only) for a sequence number range.
