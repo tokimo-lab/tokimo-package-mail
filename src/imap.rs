@@ -152,7 +152,7 @@ pub async fn fetch_summaries(session: &mut ImapSession, seq_range: &str) -> Resu
         summaries.push(build_summary_from_fetch(fetch));
     }
 
-    summaries.sort_by(|a, b| b.uid.cmp(&a.uid));
+    summaries.sort_by_key(|s| std::cmp::Reverse(s.uid));
     Ok(summaries)
 }
 
@@ -199,7 +199,7 @@ async fn fetch_summaries_envelope(
         summaries.push(build_summary_from_fetch(fetch));
     }
 
-    summaries.sort_by(|a, b| b.uid.cmp(&a.uid));
+    summaries.sort_by_key(|s| std::cmp::Reverse(s.uid));
     Ok(summaries)
 }
 
@@ -229,7 +229,7 @@ fn fetch_summaries_header_fields_resilient<'a>(
                 let mut out = fetch_summaries_header_fields_resilient(session, &left).await?;
                 let mut right_out = fetch_summaries_header_fields_resilient(session, &right).await?;
                 out.append(&mut right_out);
-                out.sort_by(|a, b| b.uid.cmp(&a.uid));
+                out.sort_by_key(|s| std::cmp::Reverse(s.uid));
                 Ok(out)
             }
         }
@@ -257,7 +257,7 @@ async fn fetch_summaries_header_fields(
         summaries.push(build_summary_from_header_fields(fetch));
     }
 
-    summaries.sort_by(|a, b| b.uid.cmp(&a.uid));
+    summaries.sort_by_key(|s| std::cmp::Reverse(s.uid));
     Ok(summaries)
 }
 
@@ -479,7 +479,7 @@ pub async fn idle_wait(session: ImapSession, timeout_secs: u64) -> Result<(ImapS
         std::time::Duration::from_secs(timeout_secs)
     } else {
         // RFC recommends re-issuing IDLE every 29 minutes.
-        std::time::Duration::from_secs(29 * 60)
+        std::time::Duration::from_mins(29)
     };
 
     let (idle_wait, _interrupt) = idle.wait_with_timeout(duration);
