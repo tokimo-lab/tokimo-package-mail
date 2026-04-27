@@ -119,10 +119,7 @@ pub async fn select_folder(session: &mut ImapSession, folder: &str) -> Result<(u
 /// RFC 3501 §2.3.1.1: `UIDVALIDITY` changes if the server's UID space is reset
 /// (mailbox deleted + recreated, Dovecot rebuild, etc.). Callers that persist
 /// UIDs locally MUST purge their cache and resync when this value changes.
-pub async fn select_folder_ex(
-    session: &mut ImapSession,
-    folder: &str,
-) -> Result<(u32, u32, Option<u32>), MailError> {
+pub async fn select_folder_ex(session: &mut ImapSession, folder: &str) -> Result<(u32, u32, Option<u32>), MailError> {
     let mailbox = session
         .select(folder)
         .await
