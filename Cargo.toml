@@ -13,7 +13,9 @@ path = "src/lib.rs"
 async-imap = "0.11.2"
 # SMTP (sending)
 lettre = { version = "0.11", default-features = false, features = [
-    "tokio1-rustls-tls",
+    "tokio1-rustls",
+    "webpki-roots",
+    "aws-lc-rs",
     "smtp-transport",
     "builder",
 ] }
@@ -21,7 +23,7 @@ lettre = { version = "0.11", default-features = false, features = [
 mailparse = "0.16"
 # TLS
 tokio-rustls = "0.26"
-rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "logging", "std", "tls12"] }
 rustls-pki-types = "1"
 webpki-roots = "1"
 # Async runtime
