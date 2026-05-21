@@ -259,6 +259,15 @@ impl MailSession {
         imap::fetch_summaries_by_uid_range(&mut self.session, uid_set).await
     }
 
+    /// Fetch message summaries by IMAP sequence numbers (1-based, positional).
+    /// Folder must be selected first via `open_folder`.
+    pub async fn fetch_summaries_by_seq(
+        &mut self,
+        seq_range: &str,
+    ) -> Result<Vec<crate::message::MailMessageSummary>, MailError> {
+        imap::fetch_summaries_by_seq_range(&mut self.session, seq_range).await
+    }
+
     /// Fetch full messages (with body) for a UID set string like "1,2,3" or "10:20".
     /// Folder must be selected first via `open_folder`.
     pub async fn fetch_messages_batch(&mut self, uid_set: &str) -> Result<Vec<crate::message::MailMessage>, MailError> {

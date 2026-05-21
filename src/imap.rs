@@ -200,6 +200,28 @@ async fn fetch_summaries_envelope(
     Ok(summaries)
 }
 
+/// FETCH summaries by IMAP sequence numbers (1-based, positional).
+/// Unlike `fetch_summaries_by_uid_range`, this uses `FETCH` not `UID FETCH`.
+pub async fn fetch_summaries_by_seq_range(
+    session: &mut ImapSession,
+    seq_range: &str,
+) -> Result<Vec<MailMessageSummary>, MailError> {
+    let fetches: Vec<Fetch> = session
+        .fetch(seq_range, "(UID FLAGS RFC822.SIZE INTERNALDATE ENVELOPE)")
+        .await
+        .map_err(|e| MailError::Imap(format!("FETCH seq '{seq_range}': {e}")))?
+        .try_collect()
+        .await
+        .map_err(|e| MailError::Imap(format!("FETCH stream: {e}")))?;
+
+    let mut summaries = Vec::with_capacity(fetches.len());
+    for fetch in &fetches {
+        summaries.push(build_summary_from_fetch(fetch));
+    }
+    summaries.sort_by_key(|s| std::cmp::Reverse(s.uid));
+    Ok(summaries)
+}
+
 /// UID FETCH using HEADER.FIELDS literal (binary-safe). Bisects on failure
 /// when the range is a plain `low:high`.
 fn fetch_summaries_header_fields_resilient<'a>(
@@ -755,10 +777,20 @@ fn collect_parts(
 
     if is_attachment || ctype.params.contains_key("name") {
         if let Ok(body) = part.get_body_raw() {
-            let filename = ctype
-                .params
-                .get("name")
-                .cloned()
+            // Extract filename from Content-Disposition header first, then Content-Type name param.
+            let filename = part
+                .headers
+                .iter()
+                .find(|h| h.get_key().to_lowercase() == "content-disposition")
+                .and_then(|h| {
+                    let val = h.get_value();
+                    // Parse filename from Content-Disposition: attachment; filename="foo.txt"
+                    val.split(';')
+                        .find(|p| p.trim().starts_with("filename"))
+                        .and_then(|p| p.split('=').nth(1))
+                        .map(|v| v.trim().trim_matches('"').to_string())
+                })
+                .or_else(|| ctype.params.get("name").cloned())
                 .unwrap_or_else(|| "attachment".to_string());
             attachments.push(MailAttachment {
                 filename,
