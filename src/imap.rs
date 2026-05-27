@@ -79,7 +79,7 @@ fn name_attr_to_str(attr: &NameAttribute<'_>) -> String {
         NameAttribute::Sent => "\\Sent".into(),
         NameAttribute::Trash => "\\Trash".into(),
         NameAttribute::Extension(s) => s.to_string(),
-        _ => format!("{attr:?}"),
+        other => panic!("unhandled NameAttribute variant: {other:?} — add an explicit mapping"),
     }
 }
 
