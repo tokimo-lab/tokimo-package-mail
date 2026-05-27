@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use async_imap::imap_proto::types::NameAttribute;
 use async_imap::types::{Fetch, Flag, Name};
 use futures::TryStreamExt;
 use tokio::net::TcpStream;
@@ -63,6 +64,25 @@ pub async fn connect(cfg: &MailAccountConfig) -> Result<ImapSession, MailError> 
     }
 }
 
+/// Convert a `NameAttribute` to its IMAP protocol string (e.g. `\Sent`).
+fn name_attr_to_str(attr: &NameAttribute<'_>) -> String {
+    match attr {
+        NameAttribute::NoInferiors => "\\Noinferiors".into(),
+        NameAttribute::NoSelect => "\\Noselect".into(),
+        NameAttribute::Marked => "\\Marked".into(),
+        NameAttribute::Unmarked => "\\Unmarked".into(),
+        NameAttribute::All => "\\All".into(),
+        NameAttribute::Archive => "\\Archive".into(),
+        NameAttribute::Drafts => "\\Drafts".into(),
+        NameAttribute::Flagged => "\\Flagged".into(),
+        NameAttribute::Junk => "\\Junk".into(),
+        NameAttribute::Sent => "\\Sent".into(),
+        NameAttribute::Trash => "\\Trash".into(),
+        NameAttribute::Extension(s) => s.to_string(),
+        _ => format!("{attr:?}"),
+    }
+}
+
 /// List all mailbox folders.
 pub async fn list_folders(session: &mut ImapSession) -> Result<Vec<MailFolder>, MailError> {
     let names: Vec<Name> = session
@@ -75,7 +95,7 @@ pub async fn list_folders(session: &mut ImapSession) -> Result<Vec<MailFolder>, 
 
     let mut folders = Vec::with_capacity(names.len());
     for n in &names {
-        let attrs: Vec<String> = n.attributes().iter().map(|a| format!("{a:?}")).collect();
+        let attrs: Vec<String> = n.attributes().iter().map(|a| name_attr_to_str(a)).collect();
         folders.push(MailFolder {
             name: n.name().to_string(),
             delimiter: n.delimiter().map(std::string::ToString::to_string),
